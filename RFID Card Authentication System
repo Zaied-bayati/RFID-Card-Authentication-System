@@ -21,8 +21,19 @@
  *   - Read RFID card UIDs and memory contents
  *   - Store a password in non-volatile FRAM memory (MSP430FR6989 specific)
  *   - Authenticate cards by checking if they contain the stored password
- *   - Write passwords to authorized cards via button press
- *   - Provide visual feedback using LED indicators (green for authorized, red for unauthorized)
+ *   - Write passwords to any detected card via button press during LED flash
+ *   - Provide visual feedback using blinking LED indicators:
+ *     * Green LED blinks for 3 seconds when authorized card is detected
+ *     * Red LED blinks for 3 seconds when unauthorized card is detected
+ *   - Both LEDs flash 5 times to confirm successful password write
+ * 
+ * OPERATION:
+ * When any RFID card is detected, the system performs an authorization check:
+ *   - If password is found on card: Green LED blinks for 3 seconds
+ *   - If password is not found: Red LED blinks for 3 seconds
+ *   - During the 3-second LED blink period, pressing the button (Pin 45) will
+ *     automatically write the stored password to the card
+ *   - After successful write, both LEDs flash 5 times as confirmation
  * 
  * The system uses serial commands for configuration:
  *   - "password set X" - Sets the authentication password to X (1-16 characters)
@@ -109,13 +120,18 @@
  * 3. AUTHENTICATION:
  *    - Searches card memory for stored password
  *    - Tries multiple authentication keys (default, MAD, NDEF)
- *    - Blinks GREEN LED if password found (authorized)
- *    - Blinks RED LED if password not found (unauthorized)
+ *    - GREEN LED blinks for 3 seconds if password found (authorized)
+ *    - RED LED blinks for 3 seconds if password not found (unauthorized)
+ *    - LED blinking is non-blocking and continues during all operations
  * 
  * 4. PASSWORD WRITING:
- *    - When authorized card is detected, user has 3 seconds to press button
- *    - Button press writes stored password to the card
+ *    - When ANY card is detected and LED is blinking (red or green), user has
+ *      3 seconds to press button (Pin 45)
+ *    - Button press automatically writes stored password to the card
+ *    - Both LEDs flash 5 times quickly to confirm successful write
  *    - Provides serial feedback on operation status
+ *    - Works for both authorized and unauthorized cards, making it easy to
+ *      program multiple cards quickly
  * 
  * 5. SERIAL COMMANDS:
  *    - "password set <text>" - Store password (1-16 characters)
@@ -164,7 +180,15 @@ char storedPassword[PASSWORD_MAX_LEN + 1] = "";
 bool passwordSet = false;
 bool authorizedCardDetected = false;
 unsigned long authorizedTime = 0;
+bool cardDetected = false;  // Track when any card is detected
+unsigned long cardDetectedTime = 0;  // Time when card was detected
+bool ledFlashing = false;  // Track when LED is flashing (during authorization check)
+unsigned long ledFlashStartTime = 0;  // Time when LED started flashing
+int ledFlashPin = -1;  // Which LED pin is flashing (-1 = none, GREEN_LED or RED_LED)
+unsigned long lastLedToggle = 0;  // Last time LED was toggled
+bool ledState = false;  // Current LED state (HIGH/LOW)
 const unsigned long AUTHORIZED_WINDOW = 3000; // 3 seconds
+const unsigned long LED_BLINK_INTERVAL = 200; // LED blink interval in ms
 
 // Default keys for authentication
 uchar defaultKeyA[16] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
@@ -281,7 +305,16 @@ void setup() {
   digitalWrite(NRSTPD, HIGH);
   pinMode(GREEN_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
+  // Ensure LEDs start in OFF state
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, LOW);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  
+  // Initialize LED state variables
+  ledFlashing = false;
+  ledFlashPin = -1;
+  ledState = false;
+  lastLedToggle = 0;
   
   // Initialize RFID reader
   MFRC522_Init();
@@ -305,28 +338,102 @@ void setup() {
   Serial.println("  password set X - Set password to X");
   Serial.println("  rfid write X - Write X to RFID card");
   Serial.println("Scan a card to check it...");
+  
+  // Small delay to ensure everything is initialized
+  delay(100);
+  
+  // Final check - make sure LEDs are off
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, LOW);
 }
 
 void loop() {
   // Check for serial commands
   checkSerialCommands();
   
-  // Check button press during authorized window
-  if (authorizedCardDetected && (millis() - authorizedTime < AUTHORIZED_WINDOW)) {
+  // Handle non-blocking LED blinking during authorization check
+  if (ledFlashing && (millis() - ledFlashStartTime < AUTHORIZED_WINDOW)) {
+    // Toggle LED at specified interval
+    if (millis() - lastLedToggle >= LED_BLINK_INTERVAL) {
+      ledState = !ledState;
+      digitalWrite(ledFlashPin, ledState ? HIGH : LOW);
+      lastLedToggle = millis();
+    }
+    
+    // Check button press during LED flashing period
     if (digitalRead(BUTTON_PIN) == LOW) {
-      delay(50); // Debounce
+      delay(20); // Reduced debounce time
       if (digitalRead(BUTTON_PIN) == LOW) {
-        Serial.println("Button pressed! Writing password to card...");
+        Serial.println("Button pressed during LED flash! Writing password to card...");
         if (selectCard(false)) {
-          writeToCard(storedPassword);
+          if (passwordSet) {
+            writeToCard(storedPassword);
+            // Flash both LEDs 5 times to indicate successful write
+            flashBothLEDs(5);
+            Serial.println("Password written successfully!");
+          } else {
+            Serial.println("No password set. Use 'password set X' to set one.");
+          }
+        } else {
+          Serial.println("Error: Card no longer detected. Please scan card again.");
         }
-        authorizedCardDetected = false; // Reset flag
+        // Turn off flashing LED and reset flags
+        if (ledFlashPin != -1) {
+          digitalWrite(ledFlashPin, LOW);
+        }
+        // Make sure both LEDs are off
+        digitalWrite(GREEN_LED, LOW);
+        digitalWrite(RED_LED, LOW);
+        ledFlashing = false;
+        ledFlashPin = -1;
+        ledState = false;
+      }
+    }
+  } else if (ledFlashing) {
+    // LED flash window expired, turn off LED and reset flags
+    if (ledFlashPin != -1) {
+      digitalWrite(ledFlashPin, LOW);
+    }
+    // Make sure both LEDs are off
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+    ledFlashing = false;
+    ledFlashPin = -1;
+    ledState = false;
+  } else {
+    // When not flashing, ensure LEDs are off (safety check)
+    // Only do this if we're sure we're not in the middle of a flash
+    if (millis() > 1000) { // Only after system has been running for 1 second
+      digitalWrite(GREEN_LED, LOW);
+      digitalWrite(RED_LED, LOW);
+    }
+  }
+  
+  // Check for button press when LED is not flashing (for debugging)
+  if (!ledFlashing) {
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      delay(20); // Reduced debounce time
+      if (digitalRead(BUTTON_PIN) == LOW) {
+        Serial.println("Button pressed but no card detected.");
       }
     }
   }
   
   // Scan for cards
   if (selectCard(true)) {
+    // Reset any previous LED state before processing new card
+    if (ledFlashing) {
+      digitalWrite(GREEN_LED, LOW);
+      digitalWrite(RED_LED, LOW);
+      ledFlashing = false;
+      ledFlashPin = -1;
+      ledState = false;
+    }
+    
+    // Mark that a card was detected and record the time
+    cardDetected = true;
+    cardDetectedTime = millis();
+    
     // Display card UID
     Serial.print("Card UID: ");
     dumpHex((char*)serNum, 4);
@@ -336,19 +443,45 @@ void loop() {
     Serial.println("Card Memory:");
     readCardMemory();
     
-    // Check if card contains password
+    // Check if card contains password (for LED indication)
     if (passwordSet) {
       checkCardPassword();
     } else {
       Serial.println("No password set. Use 'password set X' to set one.");
+      Serial.println("Press button within 3 seconds to write password to card.");
     }
     
-    delay(1000);
+    // Non-blocking delay that allows LED blinking to continue
+    unsigned long delayStart = millis();
+    while (millis() - delayStart < 1000) {
+      // Allow LED blinking to continue during delay
+      if (ledFlashing && (millis() - ledFlashStartTime < AUTHORIZED_WINDOW)) {
+        if (millis() - lastLedToggle >= LED_BLINK_INTERVAL) {
+          ledState = !ledState;
+          digitalWrite(ledFlashPin, ledState ? HIGH : LOW);
+          lastLedToggle = millis();
+        }
+      }
+      delay(10); // Small delay to prevent tight loop
+    }
   }
   
   // Reset for next loop
   MFRC522_Init();
-  delay(500);
+  
+  // Non-blocking delay that allows LED blinking to continue
+  unsigned long delayStart2 = millis();
+  while (millis() - delayStart2 < 500) {
+    // Allow LED blinking to continue during delay
+    if (ledFlashing && (millis() - ledFlashStartTime < AUTHORIZED_WINDOW)) {
+      if (millis() - lastLedToggle >= LED_BLINK_INTERVAL) {
+        ledState = !ledState;
+        digitalWrite(ledFlashPin, ledState ? HIGH : LOW);
+        lastLedToggle = millis();
+      }
+    }
+    delay(10); // Small delay to prevent tight loop
+  }
 }
 
 void checkSerialCommands() {
@@ -428,16 +561,26 @@ void checkCardPassword() {
     }
   }
   
-  // Blink appropriate LED
+  // Set LED flashing flag for non-blocking blink in main loop
   if (passwordFound) {
     Serial.println("*** AUTHORIZED CARD - Password found! ***");
     authorizedCardDetected = true;
     authorizedTime = millis();
-    blinkLED(GREEN_LED, 3000);
+    ledFlashing = true;  // Mark that LED is now flashing
+    ledFlashStartTime = millis();  // Record when LED flash started
+    ledFlashPin = GREEN_LED;  // Set which LED to flash
+    ledState = true;  // Start with LED on
+    lastLedToggle = millis();  // Initialize toggle timer
+    digitalWrite(GREEN_LED, HIGH);  // Turn on immediately
   } else {
     Serial.println("*** UNAUTHORIZED CARD - Password not found ***");
     authorizedCardDetected = false;
-    blinkLED(RED_LED, 3000);
+    ledFlashing = true;  // Mark that LED is now flashing (red)
+    ledFlashStartTime = millis();  // Record when LED flash started
+    ledFlashPin = RED_LED;  // Set which LED to flash
+    ledState = true;  // Start with LED on
+    lastLedToggle = millis();  // Initialize toggle timer
+    digitalWrite(RED_LED, HIGH);  // Turn on immediately
   }
 }
 
@@ -531,6 +674,18 @@ void blinkLED(int pin, int duration) {
     delay(interval);
     digitalWrite(pin, LOW);
     delay(interval);
+  }
+}
+
+void flashBothLEDs(int times) {
+  // Flash both green and red LEDs together quickly
+  for (int i = 0; i < times; i++) {
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(RED_LED, HIGH);
+    delay(100); // Quick flash on
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+    delay(100); // Quick flash off
   }
 }
 
