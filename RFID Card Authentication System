@@ -1,0 +1,992 @@
+/*
+ * ============================================================================
+ * RFID Card Authentication System
+ * ============================================================================
+ * 
+ * PROJECT: Texas Tech University (ECE-3363-001) Final Project
+ * 
+ * AUTHORS:
+ *   Zaied Al Bayati
+ *   Corbin Burgett
+ *   Thomas Mccully
+ *   
+ *   March 2025
+ *   Built with Cursor IDE
+ *   Compiled using Energia IDE
+ *
+ *
+ * DESCRIPTION:
+ * This project implements an RFID card authentication system using the MFRC522
+ * RFID reader module. The system can:
+ *   - Read RFID card UIDs and memory contents
+ *   - Store a password in non-volatile FRAM memory (MSP430FR6989 specific)
+ *   - Authenticate cards by checking if they contain the stored password
+ *   - Write passwords to authorized cards via button press
+ *   - Provide visual feedback using LED indicators (green for authorized, red for unauthorized)
+ * 
+ * The system uses serial commands for configuration:
+ *   - "password set X" - Sets the authentication password to X (1-16 characters)
+ *   - "rfid write X" - Writes data X directly to an RFID card
+ * 
+ * HARDWARE:
+ *   - Microcontroller: MSP430FR6989 LaunchPad
+ *   - RFID Reader: MFRC522 Module
+ *   - Communication: SPI interface
+ *   - Storage: FRAM (built-in to MSP430FR6989)
+ * 
+ * REFERENCE:
+ * This code is built upon the open-source MFRC522 library for Energia:
+ *   https://github.com/londonhackspace/mfrc522-energia.git
+ * 
+ * ============================================================================
+ * PINOUT TABLE
+ * ============================================================================
+ * 
+ * Component        |  Energia Pin  |  MFRC522 Pin  |  Function          |  Notes
+ * -----------------|---------------|---------------|--------------------|------------------
+ * MFRC522 SDA (SS) |  Pin 8        |  SDA          |  Chip Select       |  SPI slave select
+ * MFRC522 RST      |  Pin 10       |  RST          |  Reset             |  Active high reset
+ * MFRC522 MOSI     |  MOSI         |  MOSI         |  SPI Data Out       |  Auto-configured by SPI library
+ * MFRC522 MISO     |  MISO         |  MISO         |  SPI Data In        |  Auto-configured by SPI library
+ * MFRC522 SCK      |  SCK          |  SCK          |  SPI Clock          |  Auto-configured by SPI library
+ * Button           |  Pin 45       |  N/A          |  Button Input       |  Pull-up enabled, triggers write
+ * RED LED          |  RED_LED      |  N/A          |  Status LED         |  Built-in LED (unauthorized)
+ * GREEN LED        |  GREEN_LED    |  N/A          |  Status LED         |  Built-in LED (authorized)
+ * Power            |  3.3V         |  3.3V         |  Power Supply       |  IMPORTANT: Use 3.3V only!
+ * Ground           |  GND          |  GND          |  Common Ground      |  Connect all grounds together
+ * 
+ * NOTE: Pin numbers refer to Energia/Arduino pin numbering convention.
+ *       SPI pins (MOSI, MISO, SCK) are automatically handled by SPI library.
+ *       The MFRC522 module MUST be powered with 3.3V, not 5V!
+ * 
+ * ============================================================================
+ * WIRING CONVERSION TABLE
+ * ============================================================================
+ * 
+ * MFRC522 Module Pin  |  Connect To MSP430FR6989 LaunchPad  |  Code Variable Name
+ * --------------------|-------------------------------------|--------------------
+ * SDA (SS)            |  Digital Pin 8                      |  chipSelectPin
+ * SCK                 |  SPI Clock (hardware SPI)           |  SCK (automatic)
+ * MOSI                |  SPI Data Out (hardware SPI)        |  MOSI (automatic)
+ * MISO                |  SPI Data In (hardware SPI)         |  MISO (automatic)
+ * RST                 |  Digital Pin 10                     |  NRSTPD
+ * IRQ                 |  Not connected (optional)            |  N/A
+ * GND                 |  Ground (GND)                       |  GND
+ * 3.3V                |  3.3V Power Pin                     |  3.3V
+ * 
+ * ADDITIONAL CONNECTIONS:
+ *   - Button: Connect between Pin 45 and GND (internal pull-up enabled)
+ *   - LEDs: Built-in to LaunchPad board (no external wiring needed)
+ * 
+ * WIRING STEPS:
+ *   1. MFRC522 3.3V ------> LaunchPad 3.3V
+ *   2. MFRC522 GND ------> LaunchPad GND
+ *   3. MFRC522 SDA ------> LaunchPad Pin 8
+ *   4. MFRC522 RST ------> LaunchPad Pin 10
+ *   5. MFRC522 MOSI ------> LaunchPad MOSI (check board for exact pin)
+ *   6. MFRC522 MISO ------> LaunchPad MISO (check board for exact pin)
+ *   7. MFRC522 SCK ------> LaunchPad SCK (check board for exact pin)
+ *   8. Button ------> Pin 45 and GND (optional, for password writing)
+ * 
+ * NOTE: The MFRC522 module requires 3.3V power. Do NOT use 5V as it may damage
+ *       the module. The MSP430FR6989 operates at 3.3V, making it compatible.
+ * 
+ * ============================================================================
+ * FUNCTIONALITY
+ * ============================================================================
+ * 
+ * 1. INITIALIZATION:
+ *    - Initializes SPI communication
+ *    - Configures MFRC522 RFID reader
+ *    - Loads stored password from FRAM
+ *    - Sets up button and LED pins
+ * 
+ * 2. CARD DETECTION:
+ *    - Continuously scans for RFID cards
+ *    - Displays card UID when detected
+ *    - Reads and displays card memory contents
+ * 
+ * 3. AUTHENTICATION:
+ *    - Searches card memory for stored password
+ *    - Tries multiple authentication keys (default, MAD, NDEF)
+ *    - Blinks GREEN LED if password found (authorized)
+ *    - Blinks RED LED if password not found (unauthorized)
+ * 
+ * 4. PASSWORD WRITING:
+ *    - When authorized card is detected, user has 3 seconds to press button
+ *    - Button press writes stored password to the card
+ *    - Provides serial feedback on operation status
+ * 
+ * 5. SERIAL COMMANDS:
+ *    - "password set <text>" - Store password (1-16 characters)
+ *    - "rfid write <text>" - Write data directly to card
+ * 
+ * ============================================================================
+ * AUTHENTICATION KEYS
+ * ============================================================================
+ * 
+ * The system attempts authentication with three common keys:
+ *   - Default Key: 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF
+ *   - MAD Key:    0xA0 0xA1 0xA2 0xA3 0xA4 0xA5
+ *   - NDEF Key:   0xD3 0xF7 0xD3 0xF7 0xD3 0xF7
+ * 
+ * ============================================================================
+ */
+
+#include <SPI.h>
+
+
+#define uchar unsigned char
+#define uint unsigned int
+
+// Data array maximum length
+#define MAX_LEN 16
+
+// Pin definitions
+const int chipSelectPin = 8;
+const int NRSTPD = 10;
+
+const int BUTTON_PIN = 45;     // Button pin
+
+// Password storage in FRAM (MSP430FR6989 uses FRAM instead of EEPROM)
+// Using INFO segment of FRAM for non-volatile storage
+#define FRAM_INFO_START 0x1800  // INFO segment start address
+#define PASSWORD_ADDR 0
+#define PASSWORD_MAX_LEN 16
+
+// FRAM access macros for MSP430FR6989
+#define FRAM_PASSWORD_BASE (FRAM_INFO_START + PASSWORD_ADDR)
+
+// Global variables
+uchar serNum[5];
+uchar serNum7[8];
+char storedPassword[PASSWORD_MAX_LEN + 1] = "";
+bool passwordSet = false;
+bool authorizedCardDetected = false;
+unsigned long authorizedTime = 0;
+const unsigned long AUTHORIZED_WINDOW = 3000; // 3 seconds
+
+// Default keys for authentication
+uchar defaultKeyA[16] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+uchar madKeyA[16] = { 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5 };
+uchar NDEFKeyA[16] = { 0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7 };
+
+// MF522 command bits
+#define PCD_IDLE              0x00
+#define PCD_AUTHENT           0x0E
+#define PCD_RECEIVE           0x08
+#define PCD_TRANSMIT          0x04
+#define PCD_TRANSCEIVE        0x0C
+#define PCD_RESETPHASE        0x0F
+#define PCD_CALCCRC           0x03
+
+// Mifare_One card command bits
+#define PICC_REQIDL           0x26
+#define PICC_REQALL           0x52
+#define PICC_ANTICOLL         0x93
+#define PICC_SElECTTAG        0x93
+#define PICC_ANTICOLL2        0x95
+#define PICC_ANTICOLL3        0x97
+#define PICC_AUTHENT1A        0x60
+#define PICC_AUTHENT1B        0x61
+#define PICC_READ             0x30
+#define PICC_WRITE            0xA0
+#define PICC_DECREMENT        0xC0
+#define PICC_INCREMENT        0xC1
+#define PICC_RESTORE          0xC2
+#define PICC_TRANSFER         0xB0
+#define PICC_HALT             0x50
+
+// Error codes
+#define MI_OK                 0
+#define MI_NOTAGERR           1
+#define MI_ERR                2
+
+// MFRC522 registers
+#define Reserved00            0x00
+#define CommandReg            0x01
+#define CommIEnReg            0x02
+#define DivlEnReg             0x03
+#define CommIrqReg            0x04
+#define DivIrqReg             0x05
+#define ErrorReg              0x06
+#define Status1Reg            0x07
+#define Status2Reg            0x08
+#define FIFODataReg           0x09
+#define FIFOLevelReg          0x0A
+#define WaterLevelReg         0x0B
+#define ControlReg            0x0C
+#define BitFramingReg         0x0D
+#define CollReg               0x0E
+#define Reserved01            0x0F
+#define Reserved10            0x10
+#define ModeReg               0x11
+#define TxModeReg             0x12
+#define RxModeReg             0x13
+#define TxControlReg          0x14
+#define TxAutoReg             0x15
+#define TxSelReg              0x16
+#define RxSelReg              0x17
+#define RxThresholdReg        0x18
+#define DemodReg              0x19
+#define Reserved11            0x1A
+#define Reserved12            0x1B
+#define MifareReg             0x1C
+#define Reserved13            0x1D
+#define Reserved14            0x1E
+#define SerialSpeedReg        0x1F
+#define Reserved20            0x20
+#define CRCResultRegM         0x21
+#define CRCResultRegL         0x22
+#define Reserved21            0x23
+#define ModWidthReg           0x24
+#define Reserved22            0x25
+#define RFCfgReg              0x26
+#define GsNReg                0x27
+#define CWGsPReg              0x28
+#define ModGsPReg             0x29
+#define TModeReg              0x2A
+#define TPrescalerReg         0x2B
+#define TReloadRegH           0x2C
+#define TReloadRegL           0x2D
+#define TCounterValueRegH     0x2E
+#define TCounterValueRegL     0x2F
+#define Reserved30            0x30
+#define TestSel1Reg           0x31
+#define TestSel2Reg           0x32
+#define TestPinEnReg          0x33
+#define TestPinValueReg       0x34
+#define TestBusReg            0x35
+#define AutoTestReg           0x36
+#define VersionReg            0x37
+#define AnalogTestReg         0x38
+#define TestDAC1Reg           0x39
+#define TestDAC2Reg           0x3A
+#define TestADCReg            0x3B
+#define Reserved31            0x3C
+#define Reserved32            0x3D
+#define Reserved33            0x3E
+#define Reserved34            0x3F
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Initialize SPI
+  SPI.begin();
+  
+  // Initialize pins
+  pinMode(chipSelectPin, OUTPUT);
+  digitalWrite(chipSelectPin, LOW);
+  pinMode(NRSTPD, OUTPUT);
+  digitalWrite(NRSTPD, HIGH);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  
+  // Initialize RFID reader
+  MFRC522_Init();
+  
+  // Display version info
+  uchar version = Read_MFRC522(VersionReg);
+  Serial.print("MFRC522 Version: 0x");
+  Serial.println(version, HEX);
+  
+  // Load password from FRAM
+  loadPassword();
+  
+  if (passwordSet) {
+    Serial.print("Loaded password from FRAM: ");
+    Serial.println(storedPassword);
+  } else {
+    Serial.println("No password set. Use 'password set X' to set one.");
+  }
+  
+  Serial.println("System ready. Commands:");
+  Serial.println("  password set X - Set password to X");
+  Serial.println("  rfid write X - Write X to RFID card");
+  Serial.println("Scan a card to check it...");
+}
+
+void loop() {
+  // Check for serial commands
+  checkSerialCommands();
+  
+  // Check button press during authorized window
+  if (authorizedCardDetected && (millis() - authorizedTime < AUTHORIZED_WINDOW)) {
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      delay(50); // Debounce
+      if (digitalRead(BUTTON_PIN) == LOW) {
+        Serial.println("Button pressed! Writing password to card...");
+        if (selectCard(false)) {
+          writeToCard(storedPassword);
+        }
+        authorizedCardDetected = false; // Reset flag
+      }
+    }
+  }
+  
+  // Scan for cards
+  if (selectCard(true)) {
+    // Display card UID
+    Serial.print("Card UID: ");
+    dumpHex((char*)serNum, 4);
+    Serial.println();
+    
+    // Read and display card memory
+    Serial.println("Card Memory:");
+    readCardMemory();
+    
+    // Check if card contains password
+    if (passwordSet) {
+      checkCardPassword();
+    } else {
+      Serial.println("No password set. Use 'password set X' to set one.");
+    }
+    
+    delay(1000);
+  }
+  
+  // Reset for next loop
+  MFRC522_Init();
+  delay(500);
+}
+
+void checkSerialCommands() {
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    command.toLowerCase();
+    
+    // Parse "password set X"
+    if (command.startsWith("password set ")) {
+      String newPassword = command.substring(13);
+      newPassword.trim();
+      if (newPassword.length() > 0 && newPassword.length() <= PASSWORD_MAX_LEN) {
+        newPassword.toCharArray(storedPassword, PASSWORD_MAX_LEN + 1);
+        passwordSet = true;
+        savePassword();
+        Serial.print("Password set to: ");
+        Serial.println(storedPassword);
+      } else {
+        Serial.println("Error: Password must be 1-16 characters");
+      }
+    }
+    // Parse "rfid write X"
+    else if (command.startsWith("rfid write ")) {
+      String dataToWrite = command.substring(11);
+      dataToWrite.trim();
+      if (dataToWrite.length() > 0) {
+        Serial.print("Writing to card: ");
+        Serial.println(dataToWrite);
+        if (selectCard(false)) {
+          writeToCard(dataToWrite.c_str());
+        } else {
+          Serial.println("Error: No card detected");
+        }
+      } else {
+        Serial.println("Error: No data to write");
+      }
+    }
+  }
+}
+
+void checkCardPassword() {
+  uchar status;
+  uchar buffer[MAX_LEN];
+  bool passwordFound = false;
+  
+  // Try to read blocks and search for password
+  for (int block = 4; block < 64; block++) { // Start from block 4 (skip sector trailers)
+    if (block % 4 == 3) continue; // Skip sector trailer blocks
+    
+    status = MFRC522_Auth(PICC_AUTHENT1A, block, defaultKeyA, serNum);
+    if (status != MI_OK) {
+      selectCard(false);
+      status = MFRC522_Auth(PICC_AUTHENT1A, block, madKeyA, serNum);
+    }
+    if (status != MI_OK) {
+      selectCard(false);
+      status = MFRC522_Auth(PICC_AUTHENT1A, block, NDEFKeyA, serNum);
+    }
+    
+    if (status == MI_OK) {
+      status = MFRC522_Read(block, buffer);
+      if (status == MI_OK) {
+        // Check if password exists in this block
+        String blockData = "";
+        for (int i = 0; i < MAX_LEN; i++) {
+          if (buffer[i] >= 32 && buffer[i] <= 126) { // Printable ASCII
+            blockData += (char)buffer[i];
+          }
+        }
+        
+        if (blockData.indexOf(storedPassword) >= 0) {
+          passwordFound = true;
+          break;
+        }
+      }
+    }
+  }
+  
+  // Blink appropriate LED
+  if (passwordFound) {
+    Serial.println("*** AUTHORIZED CARD - Password found! ***");
+    authorizedCardDetected = true;
+    authorizedTime = millis();
+    blinkLED(GREEN_LED, 3000);
+  } else {
+    Serial.println("*** UNAUTHORIZED CARD - Password not found ***");
+    authorizedCardDetected = false;
+    blinkLED(RED_LED, 3000);
+  }
+}
+
+void readCardMemory() {
+  uchar status;
+  uchar buffer[MAX_LEN];
+  
+  for (int block = 0; block < 64; block++) {
+    status = MFRC522_Auth(PICC_AUTHENT1A, block, defaultKeyA, serNum);
+    if (status != MI_OK) {
+      selectCard(false);
+      status = MFRC522_Auth(PICC_AUTHENT1A, block, madKeyA, serNum);
+    }
+    if (status != MI_OK) {
+      selectCard(false);
+      status = MFRC522_Auth(PICC_AUTHENT1A, block, NDEFKeyA, serNum);
+    }
+    
+    if (status == MI_OK) {
+      status = MFRC522_Read(block, buffer);
+      if (status == MI_OK) {
+        if (block % 4 == 0) {
+          Serial.print("Sector ");
+          Serial.print(block / 4, DEC);
+          Serial.println(":");
+        }
+        Serial.print("Block ");
+        Serial.print(block, DEC);
+        Serial.print(": ");
+        dumpHex((char*)buffer, MAX_LEN);
+        Serial.println();
+      }
+    }
+  }
+}
+
+void writeToCard(const char* data) {
+  uchar status;
+  uchar writeBuffer[16];
+  int dataLen = strlen(data);
+  
+  // Find first writable block (skip sector trailers)
+  int writeBlock = 4; // Start from block 4
+  
+  // Clear buffer
+  for (int i = 0; i < 16; i++) {
+    writeBuffer[i] = 0;
+  }
+  
+  // Copy data to buffer
+  int copyLen = (dataLen < 16) ? dataLen : 16;
+  for (int i = 0; i < copyLen; i++) {
+    writeBuffer[i] = data[i];
+  }
+  
+  // Authenticate
+  status = MFRC522_Auth(PICC_AUTHENT1A, writeBlock, defaultKeyA, serNum);
+  if (status != MI_OK) {
+    selectCard(false);
+    status = MFRC522_Auth(PICC_AUTHENT1A, writeBlock, madKeyA, serNum);
+  }
+  if (status != MI_OK) {
+    selectCard(false);
+    status = MFRC522_Auth(PICC_AUTHENT1A, writeBlock, NDEFKeyA, serNum);
+  }
+  
+  if (status == MI_OK) {
+    status = MFRC522_Write(writeBlock, writeBuffer);
+    if (status == MI_OK) {
+      Serial.print("Successfully wrote to block ");
+      Serial.println(writeBlock);
+      Serial.print("Data: ");
+      for (int i = 0; i < copyLen; i++) {
+        Serial.print((char)writeBuffer[i]);
+      }
+      Serial.println();
+    } else {
+      Serial.println("Write failed!");
+    }
+  } else {
+    Serial.println("Authentication failed for writing!");
+  }
+}
+
+void blinkLED(int pin, int duration) {
+  int interval = 200; // Blink interval in ms
+  int iterations = duration / (interval * 2);
+  
+  for (int i = 0; i < iterations; i++) {
+    digitalWrite(pin, HIGH);
+    delay(interval);
+    digitalWrite(pin, LOW);
+    delay(interval);
+  }
+}
+
+void savePassword() {
+  // Save password to FRAM (MSP430FR6989)
+  // FRAM can be written directly like regular memory
+  volatile char *fram_ptr = (volatile char *)FRAM_PASSWORD_BASE;
+  
+  // Write password set flag
+  *fram_ptr++ = passwordSet ? 1 : 0;
+  
+  if (passwordSet) {
+    // Write password length
+    *fram_ptr++ = strlen(storedPassword);
+    // Write password string
+    for (int i = 0; i < strlen(storedPassword); i++) {
+      *fram_ptr++ = storedPassword[i];
+    }
+  }
+}
+
+void loadPassword() {
+  // Load password from FRAM (MSP430FR6989)
+  volatile char *fram_ptr = (volatile char *)FRAM_PASSWORD_BASE;
+  
+  // Read password set flag
+  passwordSet = (*fram_ptr++ == 1);
+  
+  if (passwordSet) {
+    // Read password length
+    int len = *fram_ptr++;
+    if (len > 0 && len <= PASSWORD_MAX_LEN) {
+      // Read password string
+      for (int i = 0; i < len; i++) {
+        storedPassword[i] = *fram_ptr++;
+      }
+      storedPassword[len] = '\0';
+    } else {
+      passwordSet = false;
+    }
+  }
+}
+
+// ========== RFID Functions (from reference code) ==========
+
+boolean selectCard(boolean dumpInfo) {
+  uchar status;
+  uchar buffer[MAX_LEN];
+  
+  status = MFRC522_Request(PICC_REQIDL, buffer);
+  if (status == MI_OK) {
+    if (dumpInfo) {
+      Serial.print("Card detected. ATQA:");
+      dumpHex((char*)buffer, 2);
+      Serial.println();
+    }
+    
+    status = MFRC522_Anticoll(buffer);
+    if (status == MI_OK) {
+      memcpy(serNum, buffer, 5);
+      uchar sak = 0;
+      status = MFRC522_SelectTag(serNum, &sak);
+      
+      if (status == MI_OK && ((sak & 0x04) == 0x00)) {
+        if (dumpInfo) {
+          Serial.print("UID: ");
+          dumpHex((char*)serNum, 4);
+          Serial.println();
+        }
+        
+        if ((sak & 0x20) == 0x20) {
+          uchar ats[MAX_LEN];
+          uint unLen = 0;
+          status = MFRC522_RATS(ats, &unLen);
+          if (status == MI_OK && dumpInfo) {
+            Serial.print("ATS: ");
+            dumpHex((char*)ats, ats[0]);
+            Serial.println();
+          }
+        }
+        
+        if (dumpInfo) {
+          Serial.print("SAK: ");
+          Serial.print(sak, HEX);
+          Serial.println();
+        }
+        return true;
+      } else {
+        memcpy(serNum7, &serNum[1], 3);
+        status = MFRC522_Anticoll2(buffer);
+        if (status == MI_OK) {
+          memcpy(&serNum7[3], buffer, 4);
+          status = MFRC522_SelectTag2(&serNum7[3], &sak);
+          if (dumpInfo) {
+            Serial.print("UID: ");
+            dumpHex((char*)serNum7, 7);
+            Serial.println();
+            Serial.print("SAK: ");
+            Serial.print(sak, HEX);
+            Serial.println();
+          }
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+void Write_MFRC522(uchar addr, uchar val) {
+  digitalWrite(chipSelectPin, LOW);
+  SPI.transfer((addr<<1)&0x7E);
+  SPI.transfer(val);
+  digitalWrite(chipSelectPin, HIGH);
+}
+
+uchar Read_MFRC522(uchar addr) {
+  uchar val;
+  digitalWrite(chipSelectPin, LOW);
+  SPI.transfer(((addr<<1)&0x7E) | 0x80);
+  val = SPI.transfer(0x00);
+  digitalWrite(chipSelectPin, HIGH);
+  return val;
+}
+
+void SetBitMask(uchar reg, uchar mask) {
+  uchar tmp;
+  tmp = Read_MFRC522(reg);
+  Write_MFRC522(reg, tmp | mask);
+}
+
+void ClearBitMask(uchar reg, uchar mask) {
+  uchar tmp;
+  tmp = Read_MFRC522(reg);
+  Write_MFRC522(reg, tmp & (~mask));
+}
+
+void AntennaOn(void) {
+  uchar temp;
+  temp = Read_MFRC522(TxControlReg);
+  if (!(temp & 0x03)) {
+    SetBitMask(TxControlReg, 0x03);
+  }
+}
+
+void AntennaOff(void) {
+  ClearBitMask(TxControlReg, 0x03);
+}
+
+void MFRC522_Reset(void) {
+  Write_MFRC522(CommandReg, PCD_RESETPHASE);
+}
+
+void MFRC522_Init(void) {
+  digitalWrite(NRSTPD, HIGH);
+  MFRC522_Reset();
+  
+  Write_MFRC522(TModeReg, 0x8D);
+  Write_MFRC522(TPrescalerReg, 0x3E);
+  Write_MFRC522(TReloadRegL, 30);
+  Write_MFRC522(TReloadRegH, 0);
+  
+  Write_MFRC522(TxAutoReg, 0x40);
+  Write_MFRC522(ModeReg, 0x3D);
+  AntennaOn();
+}
+
+uchar MFRC522_Request(uchar reqMode, uchar *TagType) {
+  uchar status;
+  uint backBits;
+  
+  Write_MFRC522(BitFramingReg, 0x07);
+  TagType[0] = reqMode;
+  status = MFRC522_ToCard(PCD_TRANSCEIVE, TagType, 1, TagType, &backBits);
+  
+  if ((status != MI_OK) || (backBits != 0x10)) {
+    status = MI_ERR;
+  }
+  return status;
+}
+
+uchar MFRC522_ToCard(uchar command, uchar *sendData, uchar sendLen, uchar *backData, uint *backLen) {
+  uchar status = MI_ERR;
+  uchar irqEn = 0x00;
+  uchar waitIRq = 0x00;
+  uchar lastBits;
+  uchar n;
+  uint i;
+  
+  switch (command) {
+    case PCD_AUTHENT:
+      irqEn = 0x12;
+      waitIRq = 0x10;
+      break;
+    case PCD_TRANSCEIVE:
+      irqEn = 0x77;
+      waitIRq = 0x30;
+      break;
+    default:
+      break;
+  }
+  
+  Write_MFRC522(CommIEnReg, irqEn|0x80);
+  ClearBitMask(CommIrqReg, 0x80);
+  SetBitMask(FIFOLevelReg, 0x80);
+  
+  Write_MFRC522(CommandReg, PCD_IDLE);
+  
+  for (i=0; i<sendLen; i++) {
+    Write_MFRC522(FIFODataReg, sendData[i]);
+  }
+  
+  Write_MFRC522(CommandReg, command);
+  if (command == PCD_TRANSCEIVE) {
+    SetBitMask(BitFramingReg, 0x80);
+  }
+  
+  i = 2000;
+  do {
+    n = Read_MFRC522(CommIrqReg);
+    i--;
+  } while ((i!=0) && !(n&0x01) && !(n&waitIRq));
+  
+  ClearBitMask(BitFramingReg, 0x80);
+  
+  if (i != 0) {
+    if(!(Read_MFRC522(ErrorReg) & 0x1B)) {
+      status = MI_OK;
+      if (n & irqEn & 0x01) {
+        status = MI_NOTAGERR;
+      }
+      if (command == PCD_TRANSCEIVE) {
+        n = Read_MFRC522(FIFOLevelReg);
+        lastBits = Read_MFRC522(ControlReg) & 0x07;
+        if (lastBits) {
+          *backLen = (n-1)*8 + lastBits;
+        } else {
+          *backLen = n*8;
+        }
+        if (n == 0) {
+          n = 1;
+        }
+        if (n > MAX_LEN) {
+          n = MAX_LEN;
+        }
+        
+        for (i=0; i<n; i++) {
+          backData[i] = Read_MFRC522(FIFODataReg);
+        }
+      }
+    } else {
+      status = MI_ERR;
+    }
+  }
+  return status;
+}
+
+uchar MFRC522_Anticoll(uchar *serNum) {
+  uchar status;
+  uchar i;
+  uchar serNumCheck=0;
+  uint unLen;
+  
+  Write_MFRC522(BitFramingReg, 0x00);
+  
+  serNum[0] = PICC_ANTICOLL;
+  serNum[1] = 0x20;
+  status = MFRC522_ToCard(PCD_TRANSCEIVE, serNum, 2, serNum, &unLen);
+  
+  if (status == MI_OK) {
+    for (i=0; i<4; i++) {
+      serNumCheck ^= serNum[i];
+    }
+    if (serNumCheck != serNum[i]) {
+      status = MI_ERR;
+    }
+  }
+  return status;
+}
+
+uchar MFRC522_Anticoll2(uchar *serNum) {
+  uchar status;
+  uchar i;
+  uchar serNumCheck=0;
+  uint unLen;
+  
+  Write_MFRC522(BitFramingReg, 0x00);
+  
+  serNum[0] = PICC_ANTICOLL2;
+  serNum[1] = 0x20;
+  status = MFRC522_ToCard(PCD_TRANSCEIVE, serNum, 2, serNum, &unLen);
+  
+  if (status == MI_OK) {
+    for (i=0; i<4; i++) {
+      serNumCheck ^= serNum[i];
+    }
+    if (serNumCheck != serNum[i]) {
+      status = MI_ERR;
+    }
+  }
+  return status;
+}
+
+uchar MFRC522_RATS(uchar *recvData, uint *pLen) {
+  uchar status;
+  uint unLen = 0;
+  recvData[0] = 0xE0;
+  recvData[1] = 0x50;
+  CalulateCRC(recvData, 2, &recvData[2]);
+  status = MFRC522_ToCard(PCD_TRANSCEIVE, recvData, 4, recvData, &unLen);
+  return status;
+}
+
+void CalulateCRC(uchar *pIndata, uchar len, uchar *pOutData) {
+  uchar i, n;
+  ClearBitMask(DivIrqReg, 0x04);
+  SetBitMask(FIFOLevelReg, 0x80);
+  
+  for (i=0; i<len; i++) {
+    Write_MFRC522(FIFODataReg, *(pIndata+i));
+  }
+  Write_MFRC522(CommandReg, PCD_CALCCRC);
+  
+  i = 0xFF;
+  do {
+    n = Read_MFRC522(DivIrqReg);
+    i--;
+  } while ((i!=0) && !(n&0x04));
+  
+  pOutData[0] = Read_MFRC522(CRCResultRegL);
+  pOutData[1] = Read_MFRC522(CRCResultRegM);
+}
+
+uchar MFRC522_SelectTag(uchar *serNum, uchar *sak) {
+  uchar i;
+  uchar status;
+  uint recvBits;
+  uchar buffer[9];
+  
+  buffer[0] = PICC_SElECTTAG;
+  buffer[1] = 0x70;
+  for (i=0; i<5; i++) {
+    buffer[i+2] = *(serNum+i);
+  }
+  CalulateCRC(buffer, 7, &buffer[7]);
+  status = MFRC522_ToCard(PCD_TRANSCEIVE, buffer, 9, buffer, &recvBits);
+  status = MI_OK;
+  *sak = buffer[0];
+  return status;
+}
+
+uchar MFRC522_SelectTag2(uchar *serNum, uchar *sak) {
+  uchar i;
+  uchar status;
+  uint recvBits;
+  uchar buffer[9];
+  
+  buffer[0] = PICC_ANTICOLL2;
+  buffer[1] = 0x70;
+  for (i=0; i<5; i++) {
+    buffer[i+2] = *(serNum+i);
+  }
+  CalulateCRC(buffer, 7, &buffer[7]);
+  status = MFRC522_ToCard(PCD_TRANSCEIVE, buffer, 9, buffer, &recvBits);
+  status = MI_OK;
+  *sak = buffer[0];
+  return status;
+}
+
+uchar MFRC522_Auth(uchar authMode, uchar BlockAddr, uchar *Sectorkey, uchar *serNum) {
+  uchar status;
+  uint recvBits;
+  uchar i;
+  uchar buff[12];
+  
+  buff[0] = authMode;
+  buff[1] = BlockAddr;
+  for (i=0; i<6; i++) {
+    buff[i+2] = *(Sectorkey+i);
+  }
+  for (i=0; i<4; i++) {
+    buff[i+8] = *(serNum+i);
+  }
+  status = MFRC522_ToCard(PCD_AUTHENT, buff, 12, buff, &recvBits);
+  
+  if ((status != MI_OK) || (!(Read_MFRC522(Status2Reg) & 0x08))) {
+    status = MI_ERR;
+  }
+  return status;
+}
+
+uchar MFRC522_Read(uchar blockAddr, uchar *recvData) {
+  uchar status;
+  uint unLen;
+  recvData[0] = PICC_READ;
+  recvData[1] = blockAddr;
+  CalulateCRC(recvData, 2, &recvData[2]);
+  status = MFRC522_ToCard(PCD_TRANSCEIVE, recvData, 4, recvData, &unLen);
+  if ((status != MI_OK) || (unLen != 0x90)) {
+    status = MI_ERR;
+  }
+  return status;
+}
+
+uchar MFRC522_Write(uchar blockAddr, uchar *writeData) {
+  uchar status;
+  uint recvBits;
+  uchar i;
+  uchar buff[18];
+  
+  buff[0] = PICC_WRITE;
+  buff[1] = blockAddr;
+  CalulateCRC(buff, 2, &buff[2]);
+  status = MFRC522_ToCard(PCD_TRANSCEIVE, buff, 4, buff, &recvBits);
+  
+  if ((status != MI_OK) || (recvBits != 4) || ((buff[0] & 0x0F) != 0x0A)) {
+    status = MI_ERR;
+  }
+  
+  if (status == MI_OK) {
+    for (i=0; i<16; i++) {
+      buff[i] = *(writeData+i);
+    }
+    CalulateCRC(buff, 16, &buff[16]);
+    status = MFRC522_ToCard(PCD_TRANSCEIVE, buff, 18, buff, &recvBits);
+    
+    if ((status != MI_OK) || (recvBits != 4) || ((buff[0] & 0x0F) != 0x0A)) {
+      status = MI_ERR;
+    }
+  }
+  return status;
+}
+
+void MFRC522_Halt(void) {
+  uchar status;
+  uint unLen;
+  uchar buff[4];
+  
+  buff[0] = PICC_HALT;
+  buff[1] = 0;
+  CalulateCRC(buff, 2, &buff[2]);
+  status = MFRC522_ToCard(PCD_TRANSCEIVE, buff, 4, buff, &unLen);
+}
+
+void dumpHex(char* buffer, int len) {
+  for(byte i=0; i < len; i++) {
+    char text[4];
+    if (i % 16 == 0) {
+      Serial.print(" ");
+    }
+    sprintf(text, "%02X ", (byte)(*(buffer + i)));
+    Serial.print(text);
+    
+    if (i % 16 == 15) {
+      Serial.println();
+    }
+  }
+}
+
