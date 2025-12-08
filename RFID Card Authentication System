@@ -1,3 +1,4 @@
+
 /*
  * ============================================================================
  * RFID Card Authentication System
@@ -17,27 +18,32 @@
  *
  * DESCRIPTION:
  * This project implements an RFID card authentication system using the MFRC522
- * RFID reader module. The system can:
- *   - Read RFID card UIDs and memory contents
- *   - Store a password in non-volatile FRAM memory (MSP430FR6989 specific)
- *   - Authenticate cards by checking if they contain the stored password
- *   - Write passwords to any detected card via button press during LED flash
- *   - Provide visual feedback using blinking LED indicators:
- *     * Green LED blinks for 3 seconds when authorized card is detected
- *     * Red LED blinks for 3 seconds when unauthorized card is detected
- *   - Both LEDs flash 5 times to confirm successful password write
+ * RFID reader module. The system provides a simple way to authenticate RFID cards
+ * by checking if they contain a pre-configured password stored in non-volatile memory.
  * 
- * OPERATION:
- * When any RFID card is detected, the system performs an authorization check:
- *   - If password is found on card: Green LED blinks for 3 seconds
- *   - If password is not found: Red LED blinks for 3 seconds
- *   - During the 3-second LED blink period, pressing the button (Pin 45) will
- *     automatically write the stored password to the card
- *   - After successful write, both LEDs flash 5 times as confirmation
+ * KEY FEATURES:
+ *   - Reads RFID card UIDs and displays card memory contents
+ *   - Stores authentication password in FRAM (non-volatile memory, MSP430FR6989 specific)
+ *   - Automatically checks if detected cards contain the stored password
+ *   - Visual feedback with LED indicators (green for authorized, red for unauthorized)
+ *   - Easy password programming: press button during LED flash to write password to card
  * 
- * The system uses serial commands for configuration:
- *   - "password set X" - Sets the authentication password to X (1-2 characters)
+ * HOW IT WORKS:
+ * 1. When you scan an RFID card, the system searches the card's memory for the stored password
+ * 2. If the password is found: Green LED blinks for 3 seconds (authorized card)
+ * 3. If the password is not found: Red LED blinks for 3 seconds (unauthorized card)
+ * 4. During the 3-second LED blink period, you can press the button (Pin 45) to write
+ *    the stored password to the card (useful for programming new cards)
+ * 5. After successful write, both LEDs flash 5 times to confirm
+ * 
+ * SERIAL COMMANDS:
+ * The system accepts commands via the serial monitor (9600 baud):
+ *   - "password set X" - Sets the authentication password to X (up to 32 characters)
  *   - "rfid write X" - Writes data X directly to an RFID card
+ * 
+ * NOTE: The actual limits are PASSWORD_MAX_LEN (32 characters) and available RAM.
+ * Make sure your Serial Monitor is set to send "Newline" or "Both NL & CR" as the
+ * line ending so commands are properly terminated.
  * 
  * HARDWARE:
  *   - Microcontroller: MSP430FR6989 LaunchPad
@@ -45,9 +51,23 @@
  *   - Communication: SPI interface
  *   - Storage: FRAM (built-in to MSP430FR6989)
  * 
- * REFERENCE:
+ * REFERENCES:
+ * 
+ * MFRC522 Library:
  * This code is built upon the open-source MFRC522 library for Energia:
  *   https://github.com/londonhackspace/mfrc522-energia.git
+ * 
+ * Serial Event Example (from Energia Examples):
+ * The serial command handling uses a pattern based on the Serial Event example
+ * found on Energia's examples page.
+ * 
+ * Serial Event example:
+ *   Created 24 April 2013 by Sean Alvarado
+ *   This example code is in the public domain.
+ * 
+ * Additional Serial examples:
+ *   Created 29 Nov 2010 by Tom Igoe
+ *   This example code is in the public domain.
  * 
  * ============================================================================
  * PINOUT TABLE
@@ -156,7 +176,7 @@
 #define uint unsigned int
 
 // Data array maximum length
-#define MAX_LEN 16
+#define MAX_LEN 32
 
 // Pin definitions
 const int chipSelectPin = 8;
@@ -168,32 +188,49 @@ const int BUTTON_PIN = 45;     // Button pin
 // Using INFO segment of FRAM for non-volatile storage
 #define FRAM_INFO_START 0x1800  // INFO segment start address
 #define PASSWORD_ADDR 0
-#define PASSWORD_MAX_LEN 16
+#define PASSWORD_MAX_LEN 32
 
 // FRAM access macros for MSP430FR6989
 #define FRAM_PASSWORD_BASE (FRAM_INFO_START + PASSWORD_ADDR)
 
-// Global variables
-uchar serNum[5];
-uchar serNum7[8];
-char storedPassword[PASSWORD_MAX_LEN + 1] = "";
-bool passwordSet = false;
-bool authorizedCardDetected = false;
-unsigned long authorizedTime = 0;
-bool cardDetected = false;  // Track when any card is detected
-unsigned long cardDetectedTime = 0;  // Time when card was detected
-bool ledFlashing = false;  // Track when LED is flashing (during authorization check)
-unsigned long ledFlashStartTime = 0;  // Time when LED started flashing
-int ledFlashPin = -1;  // Which LED pin is flashing (-1 = none, GREEN_LED or RED_LED)
-unsigned long lastLedToggle = 0;  // Last time LED was toggled
-bool ledState = false;  // Current LED state (HIGH/LOW)
-const unsigned long AUTHORIZED_WINDOW = 3000; // 3 seconds
-const unsigned long LED_BLINK_INTERVAL = 200; // LED blink interval in ms
+// ============================================================================
+// GLOBAL VARIABLES
+// ============================================================================
 
-// Default keys for authentication
-uchar defaultKeyA[16] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-uchar madKeyA[16] = { 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5 };
-uchar NDEFKeyA[16] = { 0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7 };
+// RFID card identification numbers (UIDs)
+uchar serNum[5];        // Standard 4-byte UID + checksum
+uchar serNum7[8];       // Extended 7-byte UID
+
+// Password storage and state
+char storedPassword[PASSWORD_MAX_LEN + 1] = "";  // Password stored in RAM
+bool passwordSet = false;  // Flag indicating if a password has been set
+
+// Card authentication state
+bool authorizedCardDetected = false;  // True if last card had the password
+unsigned long authorizedTime = 0;     // Timestamp when authorized card was detected
+
+// Card detection tracking
+bool cardDetected = false;            // True when any card is currently detected
+unsigned long cardDetectedTime = 0;   // Timestamp when card was first detected
+
+// LED blinking state (non-blocking implementation)
+bool ledFlashing = false;             // True when LED should be blinking
+unsigned long ledFlashStartTime = 0;  // When LED blinking started
+int ledFlashPin = -1;                 // Which LED is flashing (-1 = none, GREEN_LED or RED_LED)
+unsigned long lastLedToggle = 0;      // Last time LED state was toggled
+bool ledState = false;                // Current LED state (HIGH/LOW)
+const unsigned long AUTHORIZED_WINDOW = 3000;  // LED blink duration (3 seconds)
+const unsigned long LED_BLINK_INTERVAL = 200;   // Time between LED toggles (ms)
+
+// Serial command input handling
+String inputString = "";        // Accumulates characters from serial input
+boolean stringComplete = false; // True when a complete line (ending in \n) is received
+
+// Default authentication keys for MIFARE cards
+// The system tries these keys in order to access card memory
+uchar defaultKeyA[16] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };  // Factory default key
+uchar madKeyA[16] = { 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5 };    // MAD (Manufacturer Application Data) key
+uchar NDEFKeyA[16] = { 0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7 };   // NDEF (NFC Data Exchange Format) key
 
 // MF522 command bits
 #define PCD_IDLE              0x00
@@ -292,41 +329,54 @@ uchar NDEFKeyA[16] = { 0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7 };
 #define Reserved33            0x3E
 #define Reserved34            0x3F
 
+// ============================================================================
+// SETUP FUNCTION - Runs once at startup
+// ============================================================================
 void setup() {
+  // Initialize serial communication for debugging and commands
   Serial.begin(9600);
   
-  // Initialize SPI
+  // Reserve memory for serial input string to prevent fragmentation
+  inputString.reserve(200);
+  inputString = "";
+  stringComplete = false;
+  
+  // Initialize SPI bus for RFID reader communication
   SPI.begin();
   
-  // Initialize pins
-  pinMode(chipSelectPin, OUTPUT);
-  digitalWrite(chipSelectPin, LOW);
-  pinMode(NRSTPD, OUTPUT);
-  digitalWrite(NRSTPD, HIGH);
+  // Configure RFID reader control pins
+  pinMode(chipSelectPin, OUTPUT);   // SPI chip select (slave select)
+  digitalWrite(chipSelectPin, LOW);  // Start with chip selected
+  pinMode(NRSTPD, OUTPUT);           // Reset pin for MFRC522
+  digitalWrite(NRSTPD, HIGH);        // Release reset (active high)
+  
+  // Configure LED pins
   pinMode(GREEN_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
-  // Ensure LEDs start in OFF state
-  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(GREEN_LED, LOW);      // Ensure LEDs start OFF
   digitalWrite(RED_LED, LOW);
+  
+  // Configure button pin with internal pull-up resistor
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   
-  // Initialize LED state variables
+  // Initialize LED state tracking variables
   ledFlashing = false;
   ledFlashPin = -1;
   ledState = false;
   lastLedToggle = 0;
   
-  // Initialize RFID reader
+  // Initialize the MFRC522 RFID reader module
   MFRC522_Init();
   
-  // Display version info
+  // Display RFID reader version for verification
   uchar version = Read_MFRC522(VersionReg);
   Serial.print("MFRC522 Version: 0x");
   Serial.println(version, HEX);
   
-  // Load password from FRAM
+  // Load previously saved password from non-volatile FRAM memory
   loadPassword();
   
+  // Display password status
   if (passwordSet) {
     Serial.print("Loaded password from FRAM: ");
     Serial.println(storedPassword);
@@ -334,35 +384,55 @@ void setup() {
     Serial.println("No password set. Use 'password set X' to set one.");
   }
   
+  // Display system ready message and available commands
   Serial.println("System ready. Commands:");
   Serial.println("  password set X - Set password to X");
   Serial.println("  rfid write X - Write X to RFID card");
   Serial.println("Scan a card to check it...");
   
-  // Small delay to ensure everything is initialized
+  // Brief delay to ensure all initialization is complete
   delay(100);
   
-  // Final check - make sure LEDs are off
+  // Final safety check - ensure LEDs are definitely off
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(RED_LED, LOW);
 }
 
+// ============================================================================
+// MAIN LOOP - Runs continuously
+// ============================================================================
 void loop() {
-  // Check for serial commands
-  checkSerialCommands();
+  // ========================================================================
+  // SERIAL COMMAND PROCESSING
+  // ========================================================================
+  // ========================================================================
+  // SERIAL COMMAND PROCESSING
+  // ========================================================================
+  // Process serial command when a complete line is received (ending in newline)
+  // Make sure Serial Monitor is set to send "Newline" or "Both NL & CR" as line ending
+  if (stringComplete) {
+    checkSerialCommands(inputString);
+    // Clear the string for next command
+    inputString = "";
+    stringComplete = false;
+  }
   
-  // Handle non-blocking LED blinking during authorization check
+  // ========================================================================
+  // LED BLINKING HANDLING (Non-blocking)
+  // ========================================================================
+  // Blink LED during the 3-second authorization window
   if (ledFlashing && (millis() - ledFlashStartTime < AUTHORIZED_WINDOW)) {
-    // Toggle LED at specified interval
+    // Toggle LED state at the specified blink interval
     if (millis() - lastLedToggle >= LED_BLINK_INTERVAL) {
       ledState = !ledState;
       digitalWrite(ledFlashPin, ledState ? HIGH : LOW);
       lastLedToggle = millis();
     }
     
-    // Check button press during LED flashing period
+    // Check if button is pressed during LED flash period (3-second window)
+    // This allows writing password to card while LED is blinking
     if (digitalRead(BUTTON_PIN) == LOW) {
-      delay(20); // Reduced debounce time
+      delay(5); // Minimal debounce time for responsive button
       if (digitalRead(BUTTON_PIN) == LOW) {
         Serial.println("Button pressed during LED flash! Writing password to card...");
         if (selectCard(false)) {
@@ -412,14 +482,17 @@ void loop() {
   // Check for button press when LED is not flashing (for debugging)
   if (!ledFlashing) {
     if (digitalRead(BUTTON_PIN) == LOW) {
-      delay(20); // Reduced debounce time
+      delay(5); // Minimal debounce time for responsive button
       if (digitalRead(BUTTON_PIN) == LOW) {
         Serial.println("Button pressed but no card detected.");
       }
     }
   }
   
-  // Scan for cards
+  // ========================================================================
+  // RFID CARD DETECTION AND PROCESSING
+  // ========================================================================
+  // Continuously scan for RFID cards
   if (selectCard(true)) {
     // Reset any previous LED state before processing new card
     if (ledFlashing) {
@@ -430,22 +503,22 @@ void loop() {
       ledState = false;
     }
     
-    // Mark that a card was detected and record the time
+    // Mark that a card was detected and record timestamp
     cardDetected = true;
     cardDetectedTime = millis();
     
-    // Display card UID
+    // Display the card's unique identifier (UID)
     Serial.print("Card UID: ");
     dumpHex((char*)serNum, 4);
     Serial.println();
     
-    // Read and display card memory
+    // Read and display all readable memory blocks from the card
     Serial.println("Card Memory:");
     readCardMemory();
     
-    // Check if card contains password (for LED indication)
+    // Check if the card contains the stored password
     if (passwordSet) {
-      checkCardPassword();
+      checkCardPassword();  // This will set LED blinking based on result
     } else {
       Serial.println("No password set. Use 'password set X' to set one.");
       Serial.println("Press button within 3 seconds to write password to card.");
@@ -484,129 +557,245 @@ void loop() {
   }
 }
 
-void checkSerialCommands() {
-  if (Serial.available() > 0) {
-    String command = Serial.readStringUntil('\n');
-    command.trim();
-    command.toLowerCase();
-    
-    // Parse "password set X"
-    if (command.startsWith("password set ")) {
-      String newPassword = command.substring(13);
-      newPassword.trim();
-      if (newPassword.length() > 0 && newPassword.length() <= PASSWORD_MAX_LEN) {
-        newPassword.toCharArray(storedPassword, PASSWORD_MAX_LEN + 1);
-        passwordSet = true;
-        savePassword();
-        Serial.print("Password set to: ");
-        Serial.println(storedPassword);
-      } else {
-        Serial.println("Error: Password must be 1-16 characters");
+// ============================================================================
+// SERIAL COMMAND PROCESSING
+// ============================================================================
+// Processes commands received via serial monitor
+// Commands: "password set X" or "rfid write X"
+void checkSerialCommands(String inputCommand) {
+  // Debug: Show exactly what was received
+  Serial.print("RAW CMD: '");
+  Serial.print(inputCommand);
+  Serial.print("'  len=");
+  Serial.println(inputCommand.length());
+  
+  // Clean up the command string
+  String command = inputCommand;
+  command.trim();          // Remove leading/trailing whitespace (\r, spaces, \n)
+  command.toLowerCase();   // Make commands case-insensitive
+
+  // Ignore empty commands
+  if (command.length() == 0) {
+    return;
+  }
+
+  // ========================================================================
+  // PASSWORD SET COMMAND
+  // ========================================================================
+  // Format: "password set X" where X is the password to store
+  if (command.startsWith("password set ")) {
+    // Extract password from command (remove "password set " prefix)
+    String newPassword = command.substring(String("password set ").length());
+    newPassword.trim();
+
+    int pwdLen = newPassword.length();
+    // Validate password length
+    if (pwdLen > 0 && pwdLen <= PASSWORD_MAX_LEN) {
+      // Clear the password array
+      for (int i = 0; i < PASSWORD_MAX_LEN + 1; i++) {
+        storedPassword[i] = '\0';
       }
+
+      // Copy new password to storage array
+      newPassword.toCharArray(storedPassword, PASSWORD_MAX_LEN + 1);
+      storedPassword[pwdLen] = '\0';  // Ensure null termination
+      passwordSet = true;
+      
+      // Save password to non-volatile FRAM memory
+      savePassword(pwdLen);
+
+      // Confirm password was set
+      Serial.print("Password set to: ");
+      Serial.println(storedPassword);
+      Serial.print("Length stored: ");
+      Serial.println(pwdLen);
+    } else {
+      Serial.println("Error: Password must be 1-16 characters");
     }
-    // Parse "rfid write X"
-    else if (command.startsWith("rfid write ")) {
-      String dataToWrite = command.substring(11);
-      dataToWrite.trim();
-      if (dataToWrite.length() > 0) {
-        Serial.print("Writing to card: ");
-        Serial.println(dataToWrite);
-        if (selectCard(false)) {
-          writeToCard(dataToWrite.c_str());
-        } else {
-          Serial.println("Error: No card detected");
-        }
+  }
+
+  // ========================================================================
+  // RFID WRITE COMMAND
+  // ========================================================================
+  // Format: "rfid write X" where X is the data to write to card
+  else if (command.startsWith("rfid write ")) {
+    // Extract data from command (remove "rfid write " prefix)
+    String dataToWrite = command.substring(String("rfid write ").length());
+    dataToWrite.trim();
+
+    if (dataToWrite.length() > 0) {
+      Serial.print("Writing to card: ");
+      Serial.println(dataToWrite);
+
+      // Check if a card is present, then write data to it
+      if (selectCard(false)) {
+        writeToCard(dataToWrite.c_str());
       } else {
-        Serial.println("Error: No data to write");
+        Serial.println("Error: No card detected");
       }
+    } else {
+      Serial.println("Error: No data to write");
+    }
+  }
+
+  // Unknown command - display error message
+  else {
+    Serial.print("Unknown command: '");
+    Serial.print(command);
+    Serial.println("'");
+  }
+}
+
+/*
+  SerialEvent occurs whenever a new data comes in the
+  hardware serial RX. This routine is run between each
+  time loop() runs, so using delay inside loop can delay
+  response. Multiple bytes of data may be available.
+  
+  This function reads characters until a newline is found,
+  handling the case where data arrives in chunks due to
+  serial buffer limitations.
+*/
+void serialEvent() {
+  // Keep reading until we find a newline or run out of data
+  // This handles cases where the serial buffer is limited (e.g., 15 chars)
+  // and the full command arrives in multiple chunks
+  while (Serial.available() && !stringComplete) {
+    // get the new byte:
+    char inChar = (char)Serial.read(); 
+    // add it to the inputString:
+    inputString += inChar;
+    
+    // if the incoming character is a newline, set a flag
+    // so the main loop can do something about it:
+    if (inChar == '\n' || inChar == '\r') {
+      stringComplete = true;
+      // If we got \r, check if next char is \n and consume it
+      if (inChar == '\r' && Serial.available() && Serial.peek() == '\n') {
+        Serial.read(); // consume the \n
+        inputString += '\n'; // add it to the string for consistency
+      }
+      break; // Stop reading once we have a complete line
     }
   }
 }
 
+// ============================================================================
+// CARD PASSWORD CHECKING
+// ============================================================================
+// Searches the RFID card's memory for the stored password
+// Tries multiple authentication keys to access different card types
 void checkCardPassword() {
   uchar status;
   uchar buffer[MAX_LEN];
   bool passwordFound = false;
   
-  // Try to read blocks and search for password
-  for (int block = 4; block < 64; block++) { // Start from block 4 (skip sector trailers)
-    if (block % 4 == 3) continue; // Skip sector trailer blocks
+  // Search through all data blocks on the card (skip sector trailer blocks)
+  // Start from block 4 to avoid sector 0 which contains manufacturer data
+  for (int block = 4; block < 64; block++) {
+    // Skip sector trailer blocks (every 4th block starting from block 3)
+    if (block % 4 == 3) continue;
     
+    // Try to authenticate with default key first
     status = MFRC522_Auth(PICC_AUTHENT1A, block, defaultKeyA, serNum);
+    // If default key fails, try MAD key
     if (status != MI_OK) {
       selectCard(false);
       status = MFRC522_Auth(PICC_AUTHENT1A, block, madKeyA, serNum);
     }
+    // If MAD key fails, try NDEF key
     if (status != MI_OK) {
       selectCard(false);
       status = MFRC522_Auth(PICC_AUTHENT1A, block, NDEFKeyA, serNum);
     }
     
+    // If authentication succeeded, read the block
     if (status == MI_OK) {
       status = MFRC522_Read(block, buffer);
       if (status == MI_OK) {
-        // Check if password exists in this block
+        // Extract printable ASCII characters from the block
         String blockData = "";
         for (int i = 0; i < MAX_LEN; i++) {
-          if (buffer[i] >= 32 && buffer[i] <= 126) { // Printable ASCII
+          if (buffer[i] >= 32 && buffer[i] <= 126) { // Printable ASCII range
             blockData += (char)buffer[i];
           }
         }
         
+        // Check if the stored password exists in this block's data
         if (blockData.indexOf(storedPassword) >= 0) {
           passwordFound = true;
-          break;
+          break;  // Stop searching once password is found
         }
       }
     }
   }
   
-  // Set LED flashing flag for non-blocking blink in main loop
+  // ========================================================================
+  // SET LED BLINKING BASED ON AUTHENTICATION RESULT
+  // ========================================================================
   if (passwordFound) {
+    // Password found - authorized card
     Serial.println("*** AUTHORIZED CARD - Password found! ***");
     authorizedCardDetected = true;
     authorizedTime = millis();
-    ledFlashing = true;  // Mark that LED is now flashing
-    ledFlashStartTime = millis();  // Record when LED flash started
-    ledFlashPin = GREEN_LED;  // Set which LED to flash
-    ledState = true;  // Start with LED on
-    lastLedToggle = millis();  // Initialize toggle timer
+    
+    // Configure green LED to blink for 3 seconds
+    ledFlashing = true;
+    ledFlashStartTime = millis();
+    ledFlashPin = GREEN_LED;
+    ledState = true;
+    lastLedToggle = millis();
     digitalWrite(GREEN_LED, HIGH);  // Turn on immediately
   } else {
+    // Password not found - unauthorized card
     Serial.println("*** UNAUTHORIZED CARD - Password not found ***");
     authorizedCardDetected = false;
-    ledFlashing = true;  // Mark that LED is now flashing (red)
-    ledFlashStartTime = millis();  // Record when LED flash started
-    ledFlashPin = RED_LED;  // Set which LED to flash
-    ledState = true;  // Start with LED on
-    lastLedToggle = millis();  // Initialize toggle timer
+    
+    // Configure red LED to blink for 3 seconds
+    ledFlashing = true;
+    ledFlashStartTime = millis();
+    ledFlashPin = RED_LED;
+    ledState = true;
+    lastLedToggle = millis();
     digitalWrite(RED_LED, HIGH);  // Turn on immediately
   }
 }
 
+// ============================================================================
+// CARD MEMORY READING
+// ============================================================================
+// Reads and displays all readable memory blocks from the RFID card
+// Tries multiple authentication keys to access as much data as possible
 void readCardMemory() {
   uchar status;
   uchar buffer[MAX_LEN];
   
+  // Read all 64 blocks of the card
   for (int block = 0; block < 64; block++) {
+    // Try to authenticate with default key first
     status = MFRC522_Auth(PICC_AUTHENT1A, block, defaultKeyA, serNum);
+    // If default key fails, try MAD key
     if (status != MI_OK) {
       selectCard(false);
       status = MFRC522_Auth(PICC_AUTHENT1A, block, madKeyA, serNum);
     }
+    // If MAD key fails, try NDEF key
     if (status != MI_OK) {
       selectCard(false);
       status = MFRC522_Auth(PICC_AUTHENT1A, block, NDEFKeyA, serNum);
     }
     
+    // If authentication succeeded, read and display the block
     if (status == MI_OK) {
       status = MFRC522_Read(block, buffer);
       if (status == MI_OK) {
+        // Display sector header when starting a new sector
         if (block % 4 == 0) {
           Serial.print("Sector ");
           Serial.print(block / 4, DEC);
           Serial.println(":");
         }
+        // Display block number and hex data
         Serial.print("Block ");
         Serial.print(block, DEC);
         Serial.print(": ");
@@ -617,42 +806,51 @@ void readCardMemory() {
   }
 }
 
+// ============================================================================
+// CARD WRITING
+// ============================================================================
+// Writes data to the first writable block on the RFID card
+// Used for writing passwords or other data to cards
 void writeToCard(const char* data) {
   uchar status;
-  uchar writeBuffer[16];
+  uchar writeBuffer[16];  // MIFARE blocks are 16 bytes
   int dataLen = strlen(data);
   
-  // Find first writable block (skip sector trailers)
-  int writeBlock = 4; // Start from block 4
+  // Start from block 4 to avoid sector 0 (manufacturer data) and sector trailers
+  int writeBlock = 4;
   
-  // Clear buffer
+  // Clear the write buffer (fill with zeros)
   for (int i = 0; i < 16; i++) {
     writeBuffer[i] = 0;
   }
   
-  // Copy data to buffer
+  // Copy data to buffer (max 16 bytes per block)
   int copyLen = (dataLen < 16) ? dataLen : 16;
   for (int i = 0; i < copyLen; i++) {
     writeBuffer[i] = data[i];
   }
   
-  // Authenticate
+  // Try to authenticate with default key first
   status = MFRC522_Auth(PICC_AUTHENT1A, writeBlock, defaultKeyA, serNum);
+  // If default key fails, try MAD key
   if (status != MI_OK) {
     selectCard(false);
     status = MFRC522_Auth(PICC_AUTHENT1A, writeBlock, madKeyA, serNum);
   }
+  // If MAD key fails, try NDEF key
   if (status != MI_OK) {
     selectCard(false);
     status = MFRC522_Auth(PICC_AUTHENT1A, writeBlock, NDEFKeyA, serNum);
   }
   
+  // If authentication succeeded, write the data
   if (status == MI_OK) {
     status = MFRC522_Write(writeBlock, writeBuffer);
     if (status == MI_OK) {
       Serial.print("Successfully wrote to block ");
       Serial.println(writeBlock);
       Serial.print("Data: ");
+      // Display the written data
       for (int i = 0; i < copyLen; i++) {
         Serial.print((char)writeBuffer[i]);
       }
@@ -665,9 +863,15 @@ void writeToCard(const char* data) {
   }
 }
 
+// ============================================================================
+// LED HELPER FUNCTIONS
+// ============================================================================
+
+// Blinks a single LED for a specified duration (blocking function)
+// Note: This function is not currently used in the main code (non-blocking LED is used instead)
 void blinkLED(int pin, int duration) {
-  int interval = 200; // Blink interval in ms
-  int iterations = duration / (interval * 2);
+  int interval = 200;  // Blink interval in milliseconds
+  int iterations = duration / (interval * 2);  // Calculate number of on/off cycles
   
   for (int i = 0; i < iterations; i++) {
     digitalWrite(pin, HIGH);
@@ -677,38 +881,46 @@ void blinkLED(int pin, int duration) {
   }
 }
 
+// Flashes both LEDs simultaneously (used for write confirmation)
+// Called after successfully writing password to a card
 void flashBothLEDs(int times) {
   // Flash both green and red LEDs together quickly
   for (int i = 0; i < times; i++) {
     digitalWrite(GREEN_LED, HIGH);
     digitalWrite(RED_LED, HIGH);
-    delay(100); // Quick flash on
+    delay(100);  // Quick flash on
     digitalWrite(GREEN_LED, LOW);
     digitalWrite(RED_LED, LOW);
-    delay(100); // Quick flash off
+    delay(100);  // Quick flash off
   }
 }
 
-void savePassword() {
-  // Save password to FRAM (MSP430FR6989)
-  // FRAM can be written directly like regular memory
+// ============================================================================
+// PASSWORD STORAGE FUNCTIONS (FRAM)
+// ============================================================================
+
+// Saves the password to non-volatile FRAM memory
+// FRAM (Ferroelectric RAM) on MSP430FR6989 can be written like regular memory
+// Format: [flag byte][length byte][password bytes...]
+void savePassword(int pwdLen) {
   volatile char *fram_ptr = (volatile char *)FRAM_PASSWORD_BASE;
   
-  // Write password set flag
+  // Write password set flag (1 = password exists, 0 = no password)
   *fram_ptr++ = passwordSet ? 1 : 0;
   
   if (passwordSet) {
     // Write password length
-    *fram_ptr++ = strlen(storedPassword);
-    // Write password string
-    for (int i = 0; i < strlen(storedPassword); i++) {
+    *fram_ptr++ = (char)pwdLen;
+    // Write password string bytes
+    for (int i = 0; i < pwdLen; i++) {
       *fram_ptr++ = storedPassword[i];
     }
   }
 }
 
+// Loads the password from non-volatile FRAM memory
+// Called at startup to restore previously saved password
 void loadPassword() {
-  // Load password from FRAM (MSP430FR6989)
   volatile char *fram_ptr = (volatile char *)FRAM_PASSWORD_BASE;
   
   // Read password set flag
@@ -717,20 +929,30 @@ void loadPassword() {
   if (passwordSet) {
     // Read password length
     int len = *fram_ptr++;
+    // Validate length and read password
     if (len > 0 && len <= PASSWORD_MAX_LEN) {
-      // Read password string
+      // Read password string bytes
       for (int i = 0; i < len; i++) {
         storedPassword[i] = *fram_ptr++;
       }
-      storedPassword[len] = '\0';
+      storedPassword[len] = '\0';  // Null terminate the string
     } else {
+      // Invalid length - reset password flag
       passwordSet = false;
     }
   }
 }
 
-// ========== RFID Functions (from reference code) ==========
+// ============================================================================
+// LOW-LEVEL RFID FUNCTIONS
+// ============================================================================
+// These functions provide direct access to the MFRC522 RFID reader
+// Based on the MFRC522 library for Energia
+// ============================================================================
 
+// Detects and selects an RFID card
+// Returns true if a card is detected and selected successfully
+// dumpInfo: if true, displays card information (UID, ATQA, SAK) to serial
 boolean selectCard(boolean dumpInfo) {
   uchar status;
   uchar buffer[MAX_LEN];
@@ -1144,4 +1366,3 @@ void dumpHex(char* buffer, int len) {
     }
   }
 }
-
