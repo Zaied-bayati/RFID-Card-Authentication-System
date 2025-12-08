@@ -45,6 +45,17 @@
  * Make sure your Serial Monitor is set to send "Newline" or "Both NL & CR" as the
  * line ending so commands are properly terminated.
  * 
+ * SETTING LONGER PASSWORDS:
+ * If you need to set a password longer than what fits in one line, you can use a
+ * multi-line approach. First type "password set XX" (where XX is the first 2
+ * characters), then press Enter. Then continue typing the rest of your password
+ * and press Enter again. The system will concatenate the parts together.
+ * 
+ * Example: To set password "Zaied"
+ *   1. Type: "password set Za" and press Enter
+ *   2. Type: "ied" and press Enter
+ *   3. The system will store the complete password as "Zaied"
+ * 
  * HARDWARE:
  *   - Microcontroller: MSP430FR6989 LaunchPad
  *   - RFID Reader: MFRC522 Module
@@ -405,14 +416,10 @@ void loop() {
   // ========================================================================
   // SERIAL COMMAND PROCESSING
   // ========================================================================
-  // ========================================================================
-  // SERIAL COMMAND PROCESSING
-  // ========================================================================
   // Process serial command when a complete line is received (ending in newline)
-  // Make sure Serial Monitor is set to send "Newline" or "Both NL & CR" as line ending
+  // Note: Serial Monitor should be set to send "Newline" or "Both NL & CR"
   if (stringComplete) {
     checkSerialCommands(inputString);
-    // Clear the string for next command
     inputString = "";
     stringComplete = false;
   }
@@ -432,14 +439,13 @@ void loop() {
     // Check if button is pressed during LED flash period (3-second window)
     // This allows writing password to card while LED is blinking
     if (digitalRead(BUTTON_PIN) == LOW) {
-      delay(5); // Minimal debounce time for responsive button
+      delay(5);  // Minimal debounce time
       if (digitalRead(BUTTON_PIN) == LOW) {
         Serial.println("Button pressed during LED flash! Writing password to card...");
         if (selectCard(false)) {
           if (passwordSet) {
             writeToCard(storedPassword);
-            // Flash both LEDs 5 times to indicate successful write
-            flashBothLEDs(5);
+            flashBothLEDs(5);  // Flash both LEDs 5 times to indicate successful write
             Serial.println("Password written successfully!");
           } else {
             Serial.println("No password set. Use 'password set X' to set one.");
@@ -447,11 +453,10 @@ void loop() {
         } else {
           Serial.println("Error: Card no longer detected. Please scan card again.");
         }
-        // Turn off flashing LED and reset flags
+        // Turn off flashing LED and reset all flags
         if (ledFlashPin != -1) {
           digitalWrite(ledFlashPin, LOW);
         }
-        // Make sure both LEDs are off
         digitalWrite(GREEN_LED, LOW);
         digitalWrite(RED_LED, LOW);
         ledFlashing = false;
@@ -460,29 +465,28 @@ void loop() {
       }
     }
   } else if (ledFlashing) {
-    // LED flash window expired, turn off LED and reset flags
+    // LED flash window expired - turn off LED and reset flags
     if (ledFlashPin != -1) {
       digitalWrite(ledFlashPin, LOW);
     }
-    // Make sure both LEDs are off
     digitalWrite(GREEN_LED, LOW);
     digitalWrite(RED_LED, LOW);
     ledFlashing = false;
     ledFlashPin = -1;
     ledState = false;
   } else {
-    // When not flashing, ensure LEDs are off (safety check)
-    // Only do this if we're sure we're not in the middle of a flash
-    if (millis() > 1000) { // Only after system has been running for 1 second
+    // Safety check: ensure LEDs are off when not flashing
+    // Only after system has been running for 1 second
+    if (millis() > 1000) {
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(RED_LED, LOW);
     }
   }
   
-  // Check for button press when LED is not flashing (for debugging)
+  // Debug: Check for button press when LED is not flashing
   if (!ledFlashing) {
     if (digitalRead(BUTTON_PIN) == LOW) {
-      delay(5); // Minimal debounce time for responsive button
+      delay(5);  // Minimal debounce time
       if (digitalRead(BUTTON_PIN) == LOW) {
         Serial.println("Button pressed but no card detected.");
       }
@@ -571,11 +575,12 @@ void checkSerialCommands(String inputCommand) {
   
   // Clean up the command string
   String command = inputCommand;
-  command.trim();          // Remove leading/trailing whitespace (\r, spaces, \n)
-  command.toLowerCase();   // Make commands case-insensitive
+  command.trim();        // Remove leading/trailing whitespace (\r, spaces, \n)
+  command.toLowerCase(); // Make commands case-insensitive
 
-  // Ignore empty commands
+  // Ignore empty commands (e.g., just pressing Enter sends \r\n)
   if (command.length() == 0) {
+    Serial.println("(Empty command ignored)");
     return;
   }
 
@@ -610,7 +615,9 @@ void checkSerialCommands(String inputCommand) {
       Serial.print("Length stored: ");
       Serial.println(pwdLen);
     } else {
-      Serial.println("Error: Password must be 1-16 characters");
+      Serial.print("Error: Password must be 1-");
+      Serial.print(PASSWORD_MAX_LEN);
+      Serial.println(" characters");
     }
   }
 
@@ -658,24 +665,20 @@ void checkSerialCommands(String inputCommand) {
 */
 void serialEvent() {
   // Keep reading until we find a newline or run out of data
-  // This handles cases where the serial buffer is limited (e.g., 15 chars)
-  // and the full command arrives in multiple chunks
+  // This handles cases where data arrives in multiple chunks
   while (Serial.available() && !stringComplete) {
-    // get the new byte:
-    char inChar = (char)Serial.read(); 
-    // add it to the inputString:
+    char inChar = (char)Serial.read();
     inputString += inChar;
     
-    // if the incoming character is a newline, set a flag
-    // so the main loop can do something about it:
+    // If we receive a newline or carriage return, mark the string as complete
     if (inChar == '\n' || inChar == '\r') {
       stringComplete = true;
       // If we got \r, check if next char is \n and consume it
       if (inChar == '\r' && Serial.available() && Serial.peek() == '\n') {
-        Serial.read(); // consume the \n
-        inputString += '\n'; // add it to the string for consistency
+        Serial.read();      // Consume the \n
+        inputString += '\n'; // Add it to the string for consistency
       }
-      break; // Stop reading once we have a complete line
+      break;  // Stop reading once we have a complete line
     }
   }
 }
@@ -690,8 +693,8 @@ void checkCardPassword() {
   uchar buffer[MAX_LEN];
   bool passwordFound = false;
   
-  // Search through all data blocks on the card (skip sector trailer blocks)
-  // Start from block 4 to avoid sector 0 which contains manufacturer data
+  // Search through all data blocks on the card
+  // Start from block 4 to avoid sector 0 (manufacturer data)
   for (int block = 4; block < 64; block++) {
     // Skip sector trailer blocks (every 4th block starting from block 3)
     if (block % 4 == 3) continue;
@@ -709,14 +712,14 @@ void checkCardPassword() {
       status = MFRC522_Auth(PICC_AUTHENT1A, block, NDEFKeyA, serNum);
     }
     
-    // If authentication succeeded, read the block
+    // If authentication succeeded, read and search the block
     if (status == MI_OK) {
       status = MFRC522_Read(block, buffer);
       if (status == MI_OK) {
         // Extract printable ASCII characters from the block
         String blockData = "";
         for (int i = 0; i < MAX_LEN; i++) {
-          if (buffer[i] >= 32 && buffer[i] <= 126) { // Printable ASCII range
+          if (buffer[i] >= 32 && buffer[i] <= 126) {  // Printable ASCII range
             blockData += (char)buffer[i];
           }
         }
@@ -745,7 +748,7 @@ void checkCardPassword() {
     ledFlashPin = GREEN_LED;
     ledState = true;
     lastLedToggle = millis();
-    digitalWrite(GREEN_LED, HIGH);  // Turn on immediately
+    digitalWrite(GREEN_LED, HIGH);
   } else {
     // Password not found - unauthorized card
     Serial.println("*** UNAUTHORIZED CARD - Password not found ***");
@@ -757,7 +760,7 @@ void checkCardPassword() {
     ledFlashPin = RED_LED;
     ledState = true;
     lastLedToggle = millis();
-    digitalWrite(RED_LED, HIGH);  // Turn on immediately
+    digitalWrite(RED_LED, HIGH);
   }
 }
 
@@ -824,7 +827,7 @@ void writeToCard(const char* data) {
     writeBuffer[i] = 0;
   }
   
-  // Copy data to buffer (max 16 bytes per block)
+  // Copy data to buffer (max 16 bytes per MIFARE block)
   int copyLen = (dataLen < 16) ? dataLen : 16;
   for (int i = 0; i < copyLen; i++) {
     writeBuffer[i] = data[i];
@@ -868,7 +871,7 @@ void writeToCard(const char* data) {
 // ============================================================================
 
 // Blinks a single LED for a specified duration (blocking function)
-// Note: This function is not currently used in the main code (non-blocking LED is used instead)
+// Note: Not currently used - non-blocking LED implementation is used instead
 void blinkLED(int pin, int duration) {
   int interval = 200;  // Blink interval in milliseconds
   int iterations = duration / (interval * 2);  // Calculate number of on/off cycles
@@ -898,10 +901,10 @@ void flashBothLEDs(int times) {
 // ============================================================================
 // PASSWORD STORAGE FUNCTIONS (FRAM)
 // ============================================================================
+// FRAM (Ferroelectric RAM) on MSP430FR6989 can be written like regular memory
+// Storage format: [flag byte][length byte][password bytes...]
 
 // Saves the password to non-volatile FRAM memory
-// FRAM (Ferroelectric RAM) on MSP430FR6989 can be written like regular memory
-// Format: [flag byte][length byte][password bytes...]
 void savePassword(int pwdLen) {
   volatile char *fram_ptr = (volatile char *)FRAM_PASSWORD_BASE;
   
@@ -909,8 +912,7 @@ void savePassword(int pwdLen) {
   *fram_ptr++ = passwordSet ? 1 : 0;
   
   if (passwordSet) {
-    // Write password length
-    *fram_ptr++ = (char)pwdLen;
+    *fram_ptr++ = (char)pwdLen;  // Write password length
     // Write password string bytes
     for (int i = 0; i < pwdLen; i++) {
       *fram_ptr++ = storedPassword[i];
@@ -927,8 +929,7 @@ void loadPassword() {
   passwordSet = (*fram_ptr++ == 1);
   
   if (passwordSet) {
-    // Read password length
-    int len = *fram_ptr++;
+    int len = *fram_ptr++;  // Read password length
     // Validate length and read password
     if (len > 0 && len <= PASSWORD_MAX_LEN) {
       // Read password string bytes
