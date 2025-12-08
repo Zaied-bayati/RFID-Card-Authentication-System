@@ -36,7 +36,7 @@
  *   - After successful write, both LEDs flash 5 times as confirmation
  * 
  * The system uses serial commands for configuration:
- *   - "password set X" - Sets the authentication password to X (1-16 characters)
+ *   - "password set X" - Sets the authentication password to X (1-2 characters)
  *   - "rfid write X" - Writes data X directly to an RFID card
  * 
  * HARDWARE:
